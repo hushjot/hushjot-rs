@@ -1,0 +1,734 @@
+rules_version = '2';
+
+// HushJot Firestore security rules.
+//
+// Two jobs, and §15 is explicit that neither may be left to the client:
+//
+//  1. **Isolation.** A user reaches only their own documents. Nothing is
+//     readable or writable without a matching authenticated uid.
+//  2. **Revision compare-and-swap.** An update must carry exactly the next
+//     revision. §16 asks for a revision-based conflict strategy and §15 says
+//     never rely on UI logic, and those two combine into a rule the spec does
+//     not state outright: the *server* must reject a stale write. Without it a
+//     second device with an out-of-date copy silently overwrites the first.
+//     With it, that write fails and the client can preserve both versions.
+//
+// The server cannot read any of the content it is storing, so validation here
+// is limited to structure, size and monotonicity. That is the intended trade.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Two ways in. Isolation above answers "whose data is this"; this answers
+    // "may this account hold data here at all", and the two are independent —
+    // a user always passes `isOwner` for their own path, so without this any
+    // address that can authenticate can sync.
+    //
+    // `entitled()` is a paid plan: `/entitlements/{uid}`, written only by the
+    // billing API with a service account. Keyed by uid, not
+    // email, because it is the account that paid. `until` is epoch
+    // milliseconds — the period end plus grace — so a plan lapses on its own
+    // clock and needs no write to switch off.
+    //
+    // `invited()` is the original invitation list, kept so early users are
+    // grandfathered and so the operator can comp an account by hand. The email is the identity because that is what
+    // an invitation is issued to; uid is not known until the account exists.
+    // Lowercased on both sides so casing cannot decide authorisation.
+    //
+    // `exists()` then `get()` on the same path is a single billed read —
+    // document access is cached per evaluation — so checking the fields costs
+    // nothing over a bare existence test. `entitled()` goes first so a paying
+    // user costs one read and never touches the allowlist; an invitee pays
+    // one extra miss.
+    function entitlement() {
+      return get(/databases/$(database)/documents/entitlements/$(request.auth.uid)).data;
+    }
+
+    function entitled() {
+      return exists(/databases/$(database)/documents/entitlements/$(request.auth.uid))
+        && entitlement().active == true
+        && 'until' in entitlement()
+        && entitlement().until is int
+        && entitlement().until > request.time.toMillis();
+    }
+
+    function invited() {
+      return 'email' in request.auth.token
+        && request.auth.token.email is string
+        // An address containing a slash would interpolate into a different
+        // path. It could only ever miss — nothing under /allowlist is client
+        // writable — but failing closed on purpose beats failing closed by
+        // luck.
+        && request.auth.token.email.matches('^[^/]+$')
+        && exists(/databases/$(database)/documents/allowlist/$(request.auth.token.email.lower()))
+        && get(/databases/$(database)/documents/allowlist/$(request.auth.token.email.lower()))
+             .data.active == true;
+    }
+
+    function approved() {
+      return signedIn() && (entitled() || invited());
+    }
+
+    // A paid plan. Written only by the billing API; never by the app under
+    // any condition — a client that could write this could sell itself a plan.
+    // `get` of your own so the account panel can show the plan and its renewal
+    // date; never `list`, for the same reason as /allowlist below.
+    match /entitlements/{uid} {
+      allow get: if isOwner(uid);
+      allow list, write: if false;
+    }
+
+    // The invitation list. Provisioned out of band — by the operator, in the
+    // console — and never writable by the app under any condition.
+    match /allowlist/{email} {
+      // `get` only. A `list` rule is evaluated per document in the result set,
+      // so a collection query would already fail as soon as a second person is
+      // invited; denying it outright means that is a guarantee rather than an
+      // accident of how many rows happen to exist.
+      allow get: if signedIn()
+        && 'email' in request.auth.token
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == email;
+      allow list, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    // Firestore's hard limit is 1 MiB per document. Cap the encrypted payload
+    // below that so metadata and overhead cannot push a legitimate note over
+    // the edge and produce an opaque write failure.
+    function withinSizeLimit(value) {
+      return value is bytes && value.size() < 900 * 1024;
+    }
+
+    // Ciphertext must arrive as bytes. A string would mean either a client
+    // that skipped encryption or one base64-encoding it, and base64 wastes a
+    // third of the document budget (plan issue #4).
+    function isCiphertext(value) {
+      return withinSizeLimit(value);
+    }
+
+    function hasValidNoteShape() {
+      return incoming().keys().hasOnly(
+               ['v', 'meta', 'body', 'revision', 'updatedAt', 'syncedAt', 'deleted'])
+        && incoming().keys().hasAll(['v', 'meta', 'revision', 'updatedAt', 'syncedAt', 'deleted'])
+        && incoming().v is int
+        && incoming().v == 1
+        && isCiphertext(incoming().meta)
+        // A tombstone carries no body, so the field is optional but must be
+        // ciphertext whenever it is present.
+        && (!('body' in incoming()) || isCiphertext(incoming().body))
+        && incoming().revision is int
+        && incoming().revision > 0
+        && incoming().updatedAt is int
+        && incoming().deleted is bool
+        // Ordering for delta sync comes from the server clock, never the
+        // client's — a device with a skewed clock must not be able to hide
+        // its writes from another device's cursor, or jump ahead of it.
+        && incoming().syncedAt == request.time;
+    }
+
+    // A note version: the note's ciphertext as it stood before something
+    // replaced it (src/core/history/). The id is the body envelope's 96-bit
+    // nonce in hex, so one sealing of one text is one document however many
+    // devices upload it.
+    //
+    // `expireAt` is what Firestore's TTL policy deletes by (active; see
+    // firestore.indexes.blaze.json) — so it is bounded:
+    // in the future, and never more than 31 days out — the longest tier is 30.
+    // Without the ceiling a client could keep text on the backend forever.
+    // `createdAt` is the server clock, for the same reason `syncedAt` is: it
+    // orders reads, and a skewed client must not be able to misplace a version.
+    function hasValidVersionShape(versionId) {
+      return versionId.matches('^[0-9a-f]{24}$')
+        && incoming().keys().hasOnly(['v', 'meta', 'body', 'at', 'reason', 'createdAt', 'expireAt'])
+        && incoming().keys().hasAll(['v', 'meta', 'body', 'at', 'reason', 'createdAt', 'expireAt'])
+        && incoming().v is int
+        && incoming().v == 1
+        && isCiphertext(incoming().meta)
+        && isCiphertext(incoming().body)
+        && incoming().meta.size() + incoming().body.size() < 900 * 1024
+        && incoming().at is int
+        && incoming().reason in ['edit', 'delete', 'restore']
+        && incoming().createdAt == request.time
+        && incoming().expireAt is timestamp
+        && incoming().expireAt > request.time
+        && incoming().expireAt <= request.time + duration.value(31, 'd');
+    }
+
+    // A shared link's public document (src/core/share/). It holds nothing but
+    // ciphertext and two times — deliberately **no owner id**. The path carries
+    // no uid either, so two links from the same person are not correlatable by
+    // anyone who holds them, which is the whole reason ownership is proved out
+    // of band instead (see the /shares block below).
+    //
+    // The id is 16 random bytes in base64url, so `shareId` is 22 characters of
+    // that alphabet. Matching it here means a client cannot write to a
+    // hand-picked path and cannot smuggle a slash into one.
+    function hasValidShareShape(shareId, index) {
+      return shareId.matches('^[A-Za-z0-9_-]{22}$')
+        && incoming().keys().hasOnly(['v', 'payload', 'createdAt', 'expireAt'])
+        && incoming().keys().hasAll(['v', 'payload', 'createdAt', 'expireAt'])
+        && incoming().v is int
+        && incoming().v == 1
+        && isCiphertext(incoming().payload)
+        && incoming().createdAt == request.time
+        && incoming().expireAt is timestamp
+        && incoming().expireAt > request.time
+        // The ceiling, as for a version: one day more than the longest tier, so
+        // a few seconds of clock skew cannot reject a legitimate 30-day link.
+        // Without it a client could park text on the backend forever.
+        && incoming().expireAt <= request.time + duration.value(31, 'd')
+        // Tied to the owner's own record of the link, so the public copy can
+        // never outlive what the "Shared links" list says about it.
+        && incoming().expireAt == index.expireAt;
+    }
+
+    // The owner's record of a link: which note, until when, and the link's own
+    // key — sealed under the vault, so the backend cannot read it any more than
+    // it can read a note. This document is what makes revocation possible at
+    // all, it is the proof of ownership that the public one does not carry, and
+    // it is what lets the user copy the link again from another device.
+    //
+    // Note where the key is *not*: the public document. Putting it there would
+    // hand it to every recipient, which is the one thing a per-share key exists
+    // to prevent.
+    function hasValidShareIndexShape() {
+      return incoming().keys().hasOnly(['v', 'noteId', 'key', 'expireAt', 'createdAt'])
+        && incoming().keys().hasAll(['v', 'noteId', 'key', 'expireAt', 'createdAt'])
+        && incoming().v is int
+        && incoming().v == 1
+        && isCiphertext(incoming().key)
+        && isId(incoming().noteId)
+        && incoming().createdAt == request.time
+        && incoming().expireAt is timestamp
+        && incoming().expireAt > request.time
+        && incoming().expireAt <= request.time + duration.value(31, 'd');
+    }
+
+    function shareIndexPath(shareId) {
+      return /databases/$(database)/documents/users/$(request.auth.uid)/shares/$(shareId);
+    }
+
+    // The owner's record as this commit leaves it. A publish writes the record,
+    // the public blob and the meter in one commit, so the record the blob is
+    // checked against may be the one arriving beside it.
+    function ownsShareAfter(shareId) {
+      return signedIn() && existsAfter(shareIndexPath(shareId));
+    }
+
+    function ownsShare(shareId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid)/shares/$(shareId));
+    }
+
+    // A folder carries no revision and gets no compare-and-swap. There is no
+    // user text in one to lose — only a name and a parent — so §16's "preserve
+    // both versions" does not apply, and last write wins. `updatedAt` is what
+    // the client orders that by.
+    //
+    // It is optional rather than required so that a device still running an
+    // older client is not locked out of syncing altogether mid-rollout; a
+    // folder without one has only ever been created, and readers fall back to
+    // `createdAt`.
+    function hasValidFolderShape() {
+      return incoming().keys().hasOnly(['v', 'data', 'createdAt', 'updatedAt', 'syncedAt', 'deleted'])
+        && incoming().keys().hasAll(['v', 'data', 'createdAt', 'syncedAt', 'deleted'])
+        && incoming().v is int
+        && incoming().v == 1
+        && isCiphertext(incoming().data)
+        // A sealed name and a parent id. The cap keeps folders from being used
+        // as storage around the meter's per-note checks: they are metered too,
+        // but nothing legitimate is anywhere near this size.
+        && incoming().data.size() < 16 * 1024
+        && incoming().createdAt is int
+        && (!('updatedAt' in incoming()) || incoming().updatedAt is int)
+        && incoming().deleted is bool
+        && incoming().syncedAt == request.time;
+    }
+
+    // The compare-and-swap. Exactly one step forward, never a jump and never
+    // a repeat: a client that has fallen behind gets a hard rejection instead
+    // of quietly clobbering someone else's edit.
+    //
+    // `revision` here counts *accepted writes to this document*, and nothing
+    // else. It is not the writer's own edit counter. A client that confuses
+    // the two — pushing a counter that advances per keystroke into a slot that
+    // advances per write — has every push rejected as soon as its user types
+    // more than one character between syncs, reads each rejection as a
+    // conflict, and forks the note on a loop. The client anchors to the stored
+    // revision and sends that plus one; see src/core/sync/state.ts.
+    //
+    // This applies to *updates* only. There is nothing to protect on a create:
+    // the document does not exist yet, so there is no other version to lose.
+    // The rule stays permissive about which revision a create carries, for
+    // clients that anchor differently and for documents written before any of
+    // this; the current client always creates at 1.
+    function advancesRevision() {
+      return incoming().revision == resource.data.revision + 1;
+    }
+
+    // A note or folder id. Every client mints a UUID (`crypto.randomUUID()`,
+    // 36 characters) and imports mint fresh ones, so this admits everything
+    // ever written with room to spare. Bounding it matters for cost — an id is
+    // stored in the document name and in every index entry, so a 1,500-byte id
+    // would be billed on every write and every byte stored — and it is what
+    // lets the meter's `lastDoc` patterns below be exact.
+    function isId(id) {
+      return id is string && id.matches('^[A-Za-z0-9_-]{1,64}$');
+    }
+
+    // The storage meter, `users/{uid}/usage/current` (src/core/sync/usage.ts).
+    //
+    // Storage is the one thing an account can grow without bound and the one
+    // thing that is billed every month it stays, so it is capped: 1 GiB, plus
+    // whatever the plan's add-ons bought (`entitlements/{uid}.storageBytes`,
+    // written by the billing API). Writes are the other thing a modified client
+    // could run up, so every account is limited to 20,000 pushes a day too.
+    //
+    // A client moves the meter itself, with server-side increments merged into
+    // the **same commit** as the write they account for, and names that
+    // document in `lastDoc`. Being one commit is what makes it checkable:
+    // `getAfter` sees the commit's result, `get` sees the state before it, so
+    // both halves can be held to the same number.
+    //
+    //  - The **document** rule (note, folder, version, link) demands that the
+    //    meter moved by exactly the change in its own stored ciphertext, that
+    //    the meter names it, that the commit counted as one push, and that a
+    //    write which grows the account stays within the allowance. A write that
+    //    shrinks it is always accepted, so a full account can always get back
+    //    under, and nothing is ever stuck.
+    //  - The **meter** rule demands the same from the other side: whatever
+    //    `lastDoc` names must have changed by exactly the meter's change. So
+    //    the meter cannot be moved on its own, and a commit cannot pair one
+    //    note's growth with another's shrinkage.
+    //
+    // Every document write moves the meter: there is no "same size, no meter
+    // write" case any more, because the push count must move on every commit.
+    //
+    // **The minimum charge.** A note or folder counts `max(size, 1024)` — its
+    // ciphertext, but never less than 1 KiB, the cost of a stored document as
+    // such — and an absent one 0. Tombstones are charged the minimum, because
+    // they are never removed. A version counts the same towards `hist`.
+    //
+    // **The daily push limit.** `pn` counts commits in a window starting at
+    // `ws` (a server timestamp). Each commit either increments `pn` with `ws`
+    // unchanged, up to 20,000, or resets — `ws` to `request.time` and `pn` to
+    // 1 — which is allowed only once the window is more than 24 h old by the
+    // server's clock, or when there is no window yet (a meter from before the
+    // limit, or a new account). No client clock is consulted. A commit is one
+    // push however many documents it carries: one meter write per commit, and
+    // `lastDoc` naming one document, is what holds that to one note or folder
+    // (and at most one version) per push.
+    //
+    // History and shared links are metered per calendar month in `hist` and
+    // `shares` instead of `bytes`, because their TTL deletes run no rules: a
+    // stored total could only ever go up. A commit that uploads a version names
+    // it in `lastDoc` and raises this month's `hist` by exactly its charge, so
+    // a commit carries at most one version and every version is counted. A
+    // link's publish raises `shares` by exactly one. Any other commit leaves
+    // both monthly figures alone.
+    //
+    // `reconciledAt` is the billing API's: it stamps a count it made with a
+    // service account, which these rules never see. A client may carry the
+    // field over but never change it. `pushes.{YYYYMM}` is a monitoring tally
+    // the admin dashboard reads; nothing here checks it.
+    function usagePath(uid) {
+      return /databases/$(database)/documents/users/$(uid)/usage/current;
+    }
+
+    function usageBefore() {
+      return resource == null ? {} : resource.data;
+    }
+
+    // The meter before this commit and after it, from any rule's point of view.
+    function meterBefore(uid) {
+      return exists(usagePath(uid)) ? get(usagePath(uid)).data : {};
+    }
+
+    function meterAfter(uid) {
+      return getAfter(usagePath(uid)).data;
+    }
+
+    // `YYYYMM` of the server clock, as `usageMonth` writes it.
+    function thisMonth() {
+      let m = request.time.month();
+      return string(request.time.year()) + (m < 10 ? '0' + string(m) : string(m));
+    }
+
+    function monthly(data, field) {
+      return data.get(field, {}).get(thisMonth(), 0);
+    }
+
+    // 1 GiB unless the plan says otherwise. An invitee has no plan document.
+    function quota() {
+      return exists(/databases/$(database)/documents/entitlements/$(request.auth.uid))
+          && entitlement().get('storageBytes', 0) is int
+          && entitlement().get('storageBytes', 0) > 0
+        ? entitlement().storageBytes
+        : 1073741824;
+    }
+
+    // The minimum charge: `MIN_CHARGED_BYTES` in core.
+    function charged(size) {
+      return size < 1024 ? 1024 : size;
+    }
+
+    // Raw ciphertext of one stored note: `meta` + `body` (a tombstone has no
+    // body). What it counts for is `charged()` of this.
+    function noteBytes(data) {
+      return data.meta.size() + ('body' in data ? data.body.size() : 0);
+    }
+
+    // The push count moved by exactly one commit between `before` and `after`:
+    // an increment within the window, or a reset of a window the server's
+    // clock says is over. `DAILY_PUSH_LIMIT` and `PUSH_WINDOW_MS` in core.
+    //
+    // A document rule calls this on the meter before and after its commit, so
+    // a commit that leaves the meter out fails it (`after` equals `before`, and
+    // a reset would need `ws == request.time` on a window already 24 h old).
+    function pushCounted(before, after) {
+      return (after.get('ws', null) == before.get('ws', null)
+          && after.get('pn', 0) == before.get('pn', 0) + 1
+          && after.get('pn', 0) <= 20000)
+        || (after.get('ws', null) == request.time
+          && after.get('pn', 0) == 1
+          && (before.get('ws', null) == null
+            || request.time > before.ws + duration.value(24, 'h')));
+    }
+
+    // The document rule's half: the meter names `docName`, moved by `delta`,
+    // counted the push, and a write that grows the account still fits.
+    // `versioned` lets a note's write share its commit with one version of
+    // itself (the CLI's `replace`), in which case the meter names the version.
+    function meteredBy(uid, docName, delta, versioned) {
+      return existsAfter(usagePath(uid))
+        && (meterAfter(uid).get('lastDoc', '') == docName
+          || (versioned
+            && meterAfter(uid).get('lastDoc', '').matches('^' + docName + '/versions/[0-9a-f]{24}$')))
+        && meterAfter(uid).get('bytes', 0) - meterBefore(uid).get('bytes', 0) == delta
+        && (delta <= 0 || meterAfter(uid).get('bytes', 0) <= quota())
+        && pushCounted(meterBefore(uid), meterAfter(uid));
+    }
+
+    function noteMetered(uid, noteId) {
+      return meteredBy(uid, 'notes/' + noteId,
+        charged(noteBytes(incoming())) - (resource == null ? 0 : charged(noteBytes(resource.data))),
+        true);
+    }
+
+    function folderMetered(uid, folderId) {
+      return meteredBy(uid, 'folders/' + folderId,
+        charged(incoming().data.size()) - (resource == null ? 0 : charged(resource.data.data.size())),
+        false);
+    }
+
+    // A version upload's half: the meter names this version, this month's
+    // `hist` rose by exactly its charge and stays within the budget, and the
+    // commit counted as a push.
+    function versionMetered(uid, noteId, versionId) {
+      return existsAfter(usagePath(uid))
+        && meterAfter(uid).get('lastDoc', '') == 'notes/' + noteId + '/versions/' + versionId
+        && monthly(meterAfter(uid), 'hist') - monthly(meterBefore(uid), 'hist')
+             == charged(noteBytes(incoming()))
+        // 500 MB a month: `HISTORY_BYTES_PER_MONTH`.
+        && monthly(meterAfter(uid), 'hist') <= 500000000
+        && pushCounted(meterBefore(uid), meterAfter(uid));
+    }
+
+    // A link publish's half, for both of its documents: the meter names the
+    // link, this month's `shares` rose by exactly one and stays within the
+    // budget, and the commit counted as a push.
+    function shareMetered(uid, shareId) {
+      return existsAfter(usagePath(uid))
+        && meterAfter(uid).get('lastDoc', '') == 'shares/' + shareId
+        && monthly(meterAfter(uid), 'shares') - monthly(meterBefore(uid), 'shares') == 1
+        // 100 a month: `SHARES_PER_MONTH`. A re-publish counts again.
+        && monthly(meterAfter(uid), 'shares') <= 100
+        && pushCounted(meterBefore(uid), meterAfter(uid));
+    }
+
+    // The meter rule's half. `lastDoc` is a path below `users/{uid}`.
+    function userDoc(uid, relative) {
+      return path('/databases/' + database + '/documents/users/' + uid + '/' + relative);
+    }
+
+    // What the named note or folder counts for, before or after this commit.
+    function storedNote(uid, relative, after) {
+      return after
+        ? (existsAfter(userDoc(uid, relative)) ? charged(noteBytes(getAfter(userDoc(uid, relative)).data)) : 0)
+        : (exists(userDoc(uid, relative)) ? charged(noteBytes(get(userDoc(uid, relative)).data)) : 0);
+    }
+
+    function storedFolder(uid, relative, after) {
+      return after
+        ? (existsAfter(userDoc(uid, relative)) ? charged(getAfter(userDoc(uid, relative)).data.data.size()) : 0)
+        : (exists(userDoc(uid, relative)) ? charged(get(userDoc(uid, relative)).data.data.size()) : 0);
+    }
+
+    // `notes/{id}` of a `notes/{id}/versions/{versionId}` path.
+    function parentNote(relative) {
+      return 'notes/' + relative.split('/')[1];
+    }
+
+    // A version path that this commit created: absent before, present after.
+    function versionCreated(uid, relative) {
+      return !exists(userDoc(uid, relative)) && existsAfter(userDoc(uid, relative));
+    }
+
+    function meterIsHonest(uid) {
+      let doc = incoming().lastDoc;
+      let delta = incoming().get('bytes', 0) - usageBefore().get('bytes', 0);
+      let hist = monthly(incoming(), 'hist') - monthly(usageBefore(), 'hist');
+      let shares = monthly(incoming(), 'shares') - monthly(usageBefore(), 'shares');
+      return pushCounted(usageBefore(), incoming())
+        && (
+          (doc.matches('^notes/[A-Za-z0-9_-]{1,64}$') && hist == 0 && shares == 0
+            && delta == storedNote(uid, doc, true) - storedNote(uid, doc, false))
+          || (doc.matches('^folders/[A-Za-z0-9_-]{1,64}$') && hist == 0 && shares == 0
+            && delta == storedFolder(uid, doc, true) - storedFolder(uid, doc, false))
+          // A version, alone or beside its own note's write.
+          || (doc.matches('^notes/[A-Za-z0-9_-]{1,64}/versions/[0-9a-f]{24}$') && shares == 0
+            && versionCreated(uid, doc)
+            && hist == charged(noteBytes(getAfter(userDoc(uid, doc)).data))
+            && delta == storedNote(uid, parentNote(doc), true) - storedNote(uid, parentNote(doc), false))
+          || (doc.matches('^shares/[A-Za-z0-9_-]{22}$') && delta == 0 && hist == 0 && shares == 1)
+        );
+    }
+
+    function hasValidUsageShape() {
+      return incoming().keys().hasOnly(['bytes', 'hist', 'shares', 'pushes', 'ws', 'pn', 'lastDoc', 'reconciledAt'])
+        && incoming().diff(usageBefore()).affectedKeys()
+             .hasOnly(['bytes', 'hist', 'shares', 'pushes', 'ws', 'pn', 'lastDoc'])
+        && (!('bytes' in incoming()) || incoming().bytes is int)
+        && (!('hist' in incoming()) || incoming().hist is map)
+        && (!('shares' in incoming()) || incoming().shares is map)
+        && (!('pushes' in incoming()) || incoming().pushes is map)
+        && (!('ws' in incoming()) || incoming().ws is timestamp)
+        && (!('pn' in incoming()) || incoming().pn is int)
+        && incoming().lastDoc is string
+        && incoming().lastDoc.size() < 400;
+    }
+
+    // The serialised key record (`SerializedKeyRecord` in core): salts, KDF
+    // parameters and two wrapped copies of the DEK, about 500 bytes. The rules
+    // cannot measure a map's bytes, so its size is bounded by its shape — these
+    // fields and no others, each string capped — which holds a record under
+    // 3 KiB however it is filled. The caps are several times today's values
+    // (a 44-character salt, an 84-character wrap) so a longer envelope fits.
+    function boundedString(value, max) {
+      return value is string && value.size() <= max;
+    }
+
+    function hasValidKeyRecord(record) {
+      return record is map
+        && record.keys().hasOnly(
+             ['version', 'passphrase', 'recovery', 'wrappedByPassphrase', 'wrappedByRecovery', 'createdAt'])
+        && record.keys().hasAll(
+             ['version', 'passphrase', 'recovery', 'wrappedByPassphrase', 'wrappedByRecovery', 'createdAt'])
+        && record.version is int
+        && record.createdAt is int
+        && boundedString(record.wrappedByPassphrase, 1024)
+        && boundedString(record.wrappedByRecovery, 1024)
+        && record.passphrase is map
+        && record.passphrase.keys().hasOnly(['name', 'memoryKiB', 'iterations', 'parallelism', 'salt'])
+        && record.passphrase.keys().hasAll(['name', 'memoryKiB', 'iterations', 'parallelism', 'salt'])
+        && boundedString(record.passphrase.name, 64)
+        && record.passphrase.memoryKiB is int
+        && record.passphrase.iterations is int
+        && record.passphrase.parallelism is int
+        && boundedString(record.passphrase.salt, 256)
+        && record.recovery is map
+        && record.recovery.keys().hasOnly(['name', 'salt'])
+        && record.recovery.keys().hasAll(['name', 'salt'])
+        && boundedString(record.recovery.name, 64)
+        && boundedString(record.recovery.salt, 256);
+    }
+
+    match /users/{uid} {
+      // The user document itself carries nothing; the subcollections do.
+      allow read: if isOwner(uid) && approved();
+      allow write: if false;
+
+      // The wrapped key record. Ciphertext, salts and KDF parameters only —
+      // everything needed to unlock on a new device, nothing that unlocks it.
+      // One per account, `primary`: the app and the CLI name no other, and a
+      // client free to pick ids could store unmetered documents here.
+      match /keys/{keyId} {
+        allow read: if isOwner(uid) && approved();
+        allow create, update: if isOwner(uid) && approved()
+          && keyId == 'primary'
+          && incoming().keys().hasOnly(['v', 'record', 'updatedAt'])
+          && incoming().keys().hasAll(['v', 'record', 'updatedAt'])
+          && incoming().v is int
+          && hasValidKeyRecord(incoming().record)
+          && incoming().updatedAt is int;
+        // Deleting the key record would orphan every note. Rotation is an
+        // update; there is no legitimate delete. The one way a record is ever
+        // retired is the billing API's vault reset, for a user who has lost
+        // both secrets: a service account replaces it with a tombstone
+        // ({ v, resetAt, updatedAt }, no `record`). Creating the new vault is
+        // then an ordinary update of that document, under the rule above.
+        allow delete: if false;
+      }
+
+      match /notes/{noteId} {
+        allow read: if isOwner(uid) && approved();
+
+        allow create: if isOwner(uid) && approved() && isId(noteId) && hasValidNoteShape()
+          && noteMetered(uid, noteId);
+
+        allow update: if isOwner(uid)
+          && approved()
+          && isId(noteId)
+          && hasValidNoteShape()
+          && advancesRevision()
+          && noteMetered(uid, noteId);
+
+        // Deletion is a tombstone (deleted: true), so the other devices learn
+        // about it. A hard delete would simply resurrect on their next push.
+        allow delete: if false;
+
+        // Versions are created and never changed. There is no client delete:
+        // history is what protects a user against a stolen session overwriting
+        // their notes, so that session must not be able to erase it. A TTL
+        // policy on `expireAt` removes each one once enabled (Blaze only; see
+        // "Version expiry" in docs/firebase-setup.md). Until then they stay, and
+        // the app ignores expired ones.
+        match /versions/{versionId} {
+          allow read: if isOwner(uid) && approved();
+          allow create: if isOwner(uid) && approved() && isId(noteId)
+            && hasValidVersionShape(versionId)
+            && versionMetered(uid, noteId, versionId);
+          allow update, delete: if false;
+        }
+      }
+
+      match /folders/{folderId} {
+        allow read: if isOwner(uid) && approved();
+        allow create, update: if isOwner(uid) && approved() && isId(folderId)
+          && hasValidFolderShape()
+          && folderMetered(uid, folderId);
+        allow delete: if false;
+      }
+
+      // Proof that the account holder agreed to a version of the terms: written
+      // by hushjot.com's account page when an account is created or a plan is
+      // bought, one document per terms version (`1.0`). Not behind `approved()`
+      // — agreeing comes before paying. Create-only and stamped with the
+      // server's clock, because a record the client could backdate, edit or
+      // erase would prove nothing to anyone. The version is at most two digits
+      // either side of the dot: this path needs no plan and is never metered,
+      // so an unbounded id would be unbounded free storage. That caps it at
+      // 10,000 tiny documents an account, far beyond any real terms history.
+      match /consents/{version} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid)
+          && version.matches('^[0-9]{1,2}[.][0-9]{1,2}$')
+          && request.resource.data.keys().hasOnly(['terms', 'privacy', 'acceptedAt', 'via'])
+          && request.resource.data.terms == version
+          && request.resource.data.privacy is string
+          && request.resource.data.privacy.size() < 16
+          && request.resource.data.via in ['signup', 'checkout']
+          && request.resource.data.acceptedAt == request.time;
+        allow update, delete: if false;
+      }
+
+      // One document, `current`. Read by the account panel's meter and by a
+      // client explaining a refused write. Never deleted: a counter that could
+      // be reset could be talked down.
+      match /usage/{docId} {
+        allow read: if isOwner(uid) && approved() && docId == 'current';
+        allow create, update: if isOwner(uid) && approved() && docId == 'current'
+          && hasValidUsageShape()
+          && meterIsHonest(uid);
+        allow delete: if false;
+      }
+
+      // The owner's list of shared links. Read on demand by the "Shared links"
+      // dialog; never pulled and never part of the delta cursor.
+      //
+      // `delete` is allowed here, and that is the opposite of every other rule
+      // in this file. The reason is the opposite too: a version exists to
+      // protect a user from a stolen session overwriting their notes, so that
+      // session must not be able to erase it — whereas a share exists to be
+      // withdrawn, and a session that deletes every share has destroyed
+      // nothing, because the notes are still there. Refusing deletes here would
+      // mean a mis-sent link could not be pulled back, which is the main thing
+      // anyone wants from sharing.
+      match /shares/{shareId} {
+        allow read: if isOwner(uid) && approved();
+        allow create, update: if isOwner(uid) && approved()
+          && shareId.matches('^[A-Za-z0-9_-]{22}$')
+          && hasValidShareIndexShape()
+          && shareMetered(uid, shareId);
+        allow delete: if isOwner(uid) && approved();
+      }
+    }
+
+    // A shared note (§23, "sharing individual encrypted notes").
+    //
+    // This is the only rule in this file that does not consult `request.auth`
+    // on a read, and that is the feature rather than a hole in it. A link is a
+    // bearer token: 128 random bits of document id, and a 256-bit key that
+    // lives in the URL fragment and is therefore never sent to any server. The
+    // secret is the URL, not a session, which is what lets a recipient with no
+    // account, no install and no passphrase read one note — while the backend
+    // serving it still cannot.
+    //
+    // **`get`, never `list`**, exactly as for /allowlist: a `list` rule is
+    // evaluated per document in the result set, so a collection query would
+    // enumerate every share anyone has ever published. Denying it outright
+    // makes that a guarantee instead of an accident.
+    //
+    // **Expiry is enforced here, on the read.** Firestore's TTL policy
+    // (firestore.indexes.blaze.json) deletes an expired share, but typically
+    // within a day, not at the moment. This line is what makes the link stop
+    // working the moment it expires; until the sweep the ciphertext lingers,
+    // unreadable, the same way an expired version does. docs/security.md says so out loud.
+    //
+    // Writing requires an approved account that holds the matching record
+    // under its own /users path once the commit lands — so publishing is
+    // invite-only like everything else, and this cannot be used as anonymous
+    // storage. The record, this blob and the meter are **one commit**: a
+    // publish is metered like any other push (it counts against the daily push
+    // limit and this month's links), which an unmetered public write would
+    // escape, and it cannot leave an orphan of either kind. Revocation is still
+    // two deletes, blob first, because the delete rule needs the record.
+    match /shares/{shareId} {
+      // `resource != null` first: without it a plain miss evaluates
+      // `null.data` and is denied as an *evaluation error*, which is the same
+      // answer with a worse log line for anyone debugging a real one.
+      allow get: if resource != null && resource.data.expireAt > request.time;
+      allow list: if false;
+      allow create, update: if signedIn() && approved() && ownsShareAfter(shareId)
+        && hasValidShareShape(shareId, getAfter(shareIndexPath(shareId)).data)
+        && shareMetered(request.auth.uid, shareId);
+      // Revocation. No `approved()`: an account whose invitation was withdrawn
+      // must still be able to take its links down.
+      allow delete: if ownsShare(shareId);
+    }
+
+    // Anything not matched above is denied. Stated explicitly rather than
+    // relying on the default, so adding a collection cannot silently open it.
+    //
+    // That includes /status/lockdown, on purpose: the cost kill switch's
+    // ruleset (bench/lib/lockdown.mjs has an equivalent) allows a `get` of it and
+    // nothing else, so a client refused here can tell "this account may not
+    // sync" from "everyone is locked out" by whether that `get` is refused too
+    // (src/core/sync/pause.ts). Never give /status a rule in this file.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = ["crates/hushjot-core", "crates/hushjot"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hushjot/hushjot-rs"
+homepage = "https://hushjot.com"
+authors = ["HushJot contributors"]
+
+[workspace.dependencies]
+hushjot-core = { path = "crates/hushjot-core", version = "0.1.0" }
+
+aes-gcm = "0.10"
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+hkdf = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"
+zeroize = { version = "1.8", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+indexmap = "2"
+unicode-normalization = "0.1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+urlencoding = "2"
+
+proptest = "1"
+
+[profile.dev.package.argon2]
+# Argon2id at 64 MiB is painfully slow unoptimised; the contract tests unlock real key records.
+opt-level = 3
+
+[profile.test.package.argon2]
+opt-level = 3

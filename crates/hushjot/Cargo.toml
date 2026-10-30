@@ -1,0 +1,48 @@
+[package]
+name = "hushjot"
+description = "End-to-end encrypted HushJot Sync for Rust apps: sign in, unlock, and keep notes in step with the HushJot app."
+readme = "../../README.md"
+include = ["/src", "/examples", "/LICENSE-MIT", "/LICENSE-APACHE"]
+keywords = ["hushjot", "sync", "notes", "e2ee", "markdown"]
+categories = ["cryptography", "api-bindings", "text-editors"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[features]
+default = ["sqlite-store", "keyring"]
+## A durable SQLite store (ciphertext only). Without it, use `MemoryStore` or your own `Store`.
+sqlite-store = ["dep:rusqlite"]
+## Keep the refresh token and cached vault key in the OS keychain.
+keyring = ["dep:keyring"]
+
+[dependencies]
+hushjot-core.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+urlencoding.workspace = true
+zeroize.workspace = true
+rusqlite = { workspace = true, optional = true }
+keyring = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+proptest.workspace = true
+
+[[example]]
+name = "quickstart"
+required-features = ["sqlite-store"]
+
+[[example]]
+name = "mini_editor"
+required-features = ["sqlite-store", "keyring"]

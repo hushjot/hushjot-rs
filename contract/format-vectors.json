@@ -1,0 +1,347 @@
+{
+  "formatVersion": 2,
+  "generatedAt": "2026-09-22",
+  "about": "Frozen stored-byte vectors shared by the HushJot app and the HushJot CLI. Read by tests in both repositories; regenerate only when the format is deliberately changed, and move FORMAT_VERSION when you do.",
+  "envelope": {
+    "version": 1,
+    "alg": 1,
+    "headerBytes": 14,
+    "nonceBytes": 12,
+    "tagBytes": 16,
+    "aadHex": "0101"
+  },
+  "keyRecords": [
+    {
+      "id": "fast",
+      "passphrase": "correct horse battery staple vector",
+      "recoveryCode": "K7Q4-9XMV-2ZWR-8DHC-6BTN-4YFJ-3GKP-1SAE",
+      "record": {
+        "version": 1,
+        "passphrase": {
+          "name": "argon2id",
+          "memoryKiB": 8192,
+          "iterations": 1,
+          "parallelism": 1,
+          "salt": "Q+o96ryhBHU+HbYDosH1E5UA12nkTkUlAZtucZXbBvA="
+        },
+        "recovery": {
+          "name": "HKDF-SHA256",
+          "salt": "El0iVdEMoug/tsanizWkLqJABZQ1FlAfMnDY7vTEr8w="
+        },
+        "wrappedByPassphrase": "AQEcmULQNnN4XP8BBnD2y1ACUAZmdAU2zD5oe/G0u78Dg/+5cuzQPp+/86sJG5bhbg7W69ZOsjixUyntahQ=",
+        "wrappedByRecovery": "AQHjnPHfiAW5Y5LhwI29CPy8/MKjeMnYt6ybzaX+C7tC88Hyik3mDCAoRqrhuQatDxmqy3XP7yQTGKLNnBQ=",
+        "createdAt": 1790035200000
+      }
+    },
+    {
+      "id": "default",
+      "passphrase": "correct horse battery staple vector",
+      "recoveryCode": "K7Q4-9XMV-2ZWR-8DHC-6BTN-4YFJ-3GKP-1SAE",
+      "record": {
+        "version": 1,
+        "passphrase": {
+          "name": "argon2id",
+          "memoryKiB": 65536,
+          "iterations": 3,
+          "parallelism": 1,
+          "salt": "nLJ6LydaDWJb6bfJmEPtj0JInE2jsa7s/Q16TrK100s="
+        },
+        "recovery": {
+          "name": "HKDF-SHA256",
+          "salt": "/1v2T85rVgy+rlqBl+FFrKvXpjUusKHG06MQmEt0EbU="
+        },
+        "wrappedByPassphrase": "AQFsT/TKF/vPjQy9k7/rvtz9ZEqS5GTM0Ov4TWHXxmYjMo04dvnV5jQXoyALTD/DKHNeUjdof1ogg/jioKA=",
+        "wrappedByRecovery": "AQGq8hlZ9qDknT2ux9LOyfqdKrrKbSIQaA0PUXZjHMx7s4+Rzd3DMPq1SIA4ElKAtwd7gpzw2nNrNvLQcvk=",
+        "createdAt": 1790035200000
+      }
+    }
+  ],
+  "sealedUnder": "fast",
+  "noteMeta": [
+    {
+      "id": "minimal",
+      "payload": {
+        "title": "Shopping",
+        "folderId": null,
+        "pinnedAt": null
+      },
+      "json": "{\"title\":\"Shopping\",\"folderId\":null}",
+      "envelopeBase64": "AQGQRKGWCwEVxgKFpO5nR30wuDpu2JOHQEgPbtMesWgSzug2wqugXHnwgrabtuA9pvmEy8fKvGb8qGkUIlGGTlM0"
+    },
+    {
+      "id": "in-folder",
+      "payload": {
+        "title": "Rust notes",
+        "folderId": "f-1",
+        "pinnedAt": null
+      },
+      "json": "{\"title\":\"Rust notes\",\"folderId\":\"f-1\"}",
+      "envelopeBase64": "AQH2PkWCpQJ/wVgwQI5XhUteIYC/0/wgrclJmAylrTKpnLoAZ8R2jZGpmcPuFA3XE7c8ZkM8WyqKkSYIDFWD6178cNy+"
+    },
+    {
+      "id": "pinned",
+      "payload": {
+        "title": "Standup",
+        "folderId": null,
+        "pinnedAt": 1758500000123
+      },
+      "json": "{\"title\":\"Standup\",\"folderId\":null,\"pinnedAt\":1758500000123}",
+      "envelopeBase64": "AQHd6XXSyCg47y8bEM8JSBOJsJHE6O8tHznnYOsIwcshOBLFG4LCL3BEeA9KYrtISPO5O1YQWqixwo160+Iy3nK5/eFxUtZQV2lwpgPcLTf6JBf6PI/T4MBF"
+    },
+    {
+      "id": "pinned-with-excerpt",
+      "payload": {
+        "title": "Release plan",
+        "folderId": "f-2",
+        "pinnedAt": 1758500000456,
+        "excerpt": "Ship the CLI first, then the MCP server."
+      },
+      "json": "{\"title\":\"Release plan\",\"folderId\":\"f-2\",\"pinnedAt\":1758500000456,\"excerpt\":\"Ship the CLI first, then the MCP server.\"}",
+      "envelopeBase64": "AQGklSCmzqzPlK0vK5yWNgqBClfa6ZDMFroXWzXAFWY4J9/vN4ayV60n0JbW3SZgsUWUF8oHcv4Sm74Y9O3nRTSqaGYV4cC2tzY2ur0hnoHEhqn2lbHo1g4ZW+QVwiibzYGuzYpV3bEH0Z/N/fYcRe23ICSWPUG3eKvIVcEn4zkUmOmGSQ1QKpsvS4zofLelZdhFd2I="
+    },
+    {
+      "id": "empty-excerpt",
+      "payload": {
+        "title": "Blank",
+        "folderId": null,
+        "pinnedAt": null,
+        "excerpt": ""
+      },
+      "json": "{\"title\":\"Blank\",\"folderId\":null}",
+      "envelopeBase64": "AQF/qiN65JvxmbjmKZlAZ6fFPRyN5ifljln8lixh0CTvmkW46QQMfKnwkZQVpbgNYWo2MGCahteWL7DxclgB"
+    },
+    {
+      "id": "created",
+      "payload": {
+        "title": "First note",
+        "folderId": null,
+        "pinnedAt": null,
+        "createdAt": 1758400000000
+      },
+      "json": "{\"title\":\"First note\",\"folderId\":null,\"createdAt\":1758400000000}",
+      "envelopeBase64": "AQFdSjOcsLpaDGgLCSR5itMBBT+wI3RrjqBZ76oqpCMNAf0lV0yi5Rb+8FPRZKNyU6webKBZS4ugNzlj7/V/sxcTVynT0cCQxhM/gcCnpIXb45v/Ep0lAaMdyBM8WQ=="
+    },
+    {
+      "id": "every-field",
+      "payload": {
+        "title": "Release plan",
+        "folderId": "f-2",
+        "pinnedAt": 1758500000456,
+        "excerpt": "Ship the CLI first, then the MCP server.",
+        "createdAt": 1758400000000
+      },
+      "json": "{\"title\":\"Release plan\",\"folderId\":\"f-2\",\"pinnedAt\":1758500000456,\"excerpt\":\"Ship the CLI first, then the MCP server.\",\"createdAt\":1758400000000}",
+      "envelopeBase64": "AQFpkGyYdJYx6f5+ZOIP57lhEfLAArPEQScT9C9d0o+2xK9UAjlB/6InYuXgnxmjkUIy11hK7uChuaWUPpKPSuzn0RYfV05T8HQNd9S5lyao0FB5bw7JRVYlOC8LB4Lt6my6VaY8OIF7UpRVxzPPEqP5f4oglCZN7HOpwL2P0mTL1jNshmWVPJf/dVb1Pkdkd80JItjmNpwx3/pzbZq3y85IfVHjR+fR/VrnX6t62g=="
+    },
+    {
+      "id": "created-zero",
+      "payload": {
+        "title": "Epoch",
+        "folderId": null,
+        "pinnedAt": null,
+        "createdAt": 0
+      },
+      "json": "{\"title\":\"Epoch\",\"folderId\":null,\"createdAt\":0}",
+      "envelopeBase64": "AQHBNblrNReToJ61/Tk2Ikp8XkpcjhpJFoj5OhEsEpuppo5v1j8NV04yn50v5qK1XhReitau8BbPahyPPM0suWNcO4Ra37OFP0kG+KU="
+    }
+  ],
+  "body": [
+    {
+      "id": "empty",
+      "text": "",
+      "envelopeBase64": "AQEZ7Mp1KtPsoIBn+zBIBUU00AHjogbmb93h7j1K"
+    },
+    {
+      "id": "ascii",
+      "text": "# Hello\n\nA plain note.\n",
+      "envelopeBase64": "AQFe7h1O6fQZD8O5s0UnDYOYUWs9IPIWF+lATBV3cxR69HhKxtG6SNotexNx/2BwGqkbp1g="
+    },
+    {
+      "id": "unicode",
+      "text": "# Ræksmörgås 日本語\n\nEmoji: 🔐🗒️ — em-dash, “quotes”.\n",
+      "envelopeBase64": "AQEWZxfhehwjn0yF6oh+h8XVsCwcwpOePp/n8/NkmEscSAVyINZPV8G8//ZEJ1IUMxJoGvl8pVPX90rieALKAfWOrKUU8QD6LWJj5tjU+dkHAmB/DVuPOwAEu/FDNCJyfVRkB0f3wQ=="
+    },
+    {
+      "id": "fenced",
+      "text": "# Code\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n",
+      "envelopeBase64": "AQFsS4B7dO09ngEsNPDvUfUnE9ooUaLqN//2VXYEoONk5QT2I62aLTb0wXR3hDgIe3etgY2JExusS65BOp4qqzp6zMd9wXopIBl+EiqPVa4="
+    },
+    {
+      "id": "tags",
+      "text": "# Tagged\n\nSome text #work #proj/alpha and more.\n",
+      "envelopeBase64": "AQFkHuLPDnIJBkZz2pIDlE3DDqkSN3Al0+2JoKFWD6s0Bqbj/BHCReHQ42aBTLBhchgiMovY04wm170tm7sDq9rP4fMNnAb/NYczTquw"
+    }
+  ],
+  "folder": [
+    {
+      "id": "root",
+      "payload": {
+        "name": "Ideas",
+        "parentId": null
+      },
+      "json": "{\"name\":\"Ideas\",\"parentId\":null}",
+      "envelopeBase64": "AQFmAiGesFAKEprfBDpZtB+oCkPksAAa5kPTaLIApFgnYuHmUmbPUi3lymEFg1vmQUNJPMT6U/KoTdGSSLY="
+    },
+    {
+      "id": "nested",
+      "payload": {
+        "name": "Rust",
+        "parentId": "f-1"
+      },
+      "json": "{\"name\":\"Rust\",\"parentId\":\"f-1\"}",
+      "envelopeBase64": "AQG/JpNDak+xwPu6r1bLyIisVHuIDDipX0RilZDi/Hg+ZP45LyLnOW35aQ32fCng0jcfv4L0hoR3EhRskko="
+    }
+  ],
+  "deriveTitle": [
+    {
+      "content": "# Heading note\nbody",
+      "expected": "Heading note"
+    },
+    {
+      "content": "## Deeper heading",
+      "expected": "Deeper heading"
+    },
+    {
+      "content": "- bullet first\nrest",
+      "expected": "bullet first"
+    },
+    {
+      "content": "1. ordered first",
+      "expected": "ordered first"
+    },
+    {
+      "content": "> quoted first",
+      "expected": "quoted first"
+    },
+    {
+      "content": "\n\n   \nfirst real line",
+      "expected": "first real line"
+    },
+    {
+      "content": "",
+      "expected": "Untitled"
+    },
+    {
+      "content": "---",
+      "expected": "Untitled"
+    },
+    {
+      "content": "```\nfence first\n```",
+      "expected": "```"
+    },
+    {
+      "content": "A very long first line that runs well past the hundred and twenty character cap this function applies so that the tail is dropped rather than kept",
+      "expected": "A very long first line that runs well past the hundred and twenty character cap this function applies so that the tail i"
+    }
+  ],
+  "excerptOf": [
+    {
+      "content": "# Title\nSecond line becomes the excerpt.",
+      "expected": "Second line becomes the excerpt."
+    },
+    {
+      "content": "# Title\n\n```\nfenced content is skipped\n```\nafter the fence",
+      "expected": "fenced content is skipped after the fence"
+    },
+    {
+      "content": "# Only a title",
+      "expected": ""
+    },
+    {
+      "content": "No heading, just a first line\nand a second",
+      "expected": "and a second"
+    }
+  ],
+  "tokenize": [
+    {
+      "text": "Hello world",
+      "expected": [
+        "hello",
+        "world"
+      ]
+    },
+    {
+      "text": "CamelCase and snake_case and kebab-case",
+      "expected": [
+        "camelcase",
+        "and",
+        "snake_case",
+        "and",
+        "kebab",
+        "case"
+      ]
+    },
+    {
+      "text": "a bb ccc",
+      "expected": [
+        "bb",
+        "ccc"
+      ]
+    },
+    {
+      "text": "Ræksmörgås 日本語 tokens",
+      "expected": [
+        "ræksmörgås",
+        "日本語",
+        "tokens"
+      ]
+    },
+    {
+      "text": "punctuation! does; not: survive?",
+      "expected": [
+        "punctuation",
+        "does",
+        "not",
+        "survive"
+      ]
+    }
+  ],
+  "boundEnvelope": {
+    "version": 2,
+    "alg": 1,
+    "aadPrefixHex": "0201",
+    "contextFormat": "hushjot:<kind>:<record id>, UTF-8, appended to the two header bytes"
+  },
+  "bound": [
+    {
+      "id": "meta-every-field",
+      "kind": "note-meta",
+      "recordId": "n-1",
+      "plaintext": "{\"title\":\"Release plan\",\"folderId\":\"f-2\",\"pinnedAt\":1758500000456,\"excerpt\":\"Ship the CLI first, then the MCP server.\",\"createdAt\":1758400000000}",
+      "context": "hushjot:note-meta:n-1",
+      "envelopeBase64": "AgG88Y1Mvod9guVIiqMChTbVRpjl3/x1UKqK0hMnO9GcIsMa7nTQFltt1HQr+zzOmhXOn1QQ9SPNkJ95Ne0+XaY/l3Nc8Gad2zkJMq9/mzk3ktMdMWnJaRp1G9ibT+QGJ3KM3tiXDaGFYuwJcTaOkXA3DvlM2jL00NAZf76MgrqgmiECdvq2yoDS4fb5LI27TE0LdwUbOZ1NqoTall8I1IrQuuf69cllrTsPDWB+cw=="
+    },
+    {
+      "id": "body-unicode",
+      "kind": "note-body",
+      "recordId": "n-1",
+      "plaintext": "# Ræksmörgås 日本語\n\nEmoji: 🔐🗒️ — em-dash, “quotes”.\n",
+      "context": "hushjot:note-body:n-1",
+      "envelopeBase64": "AgE4GOv+MZRuXA3VtqTyzUqDOGw8wytLFByZAPzymmtBcYWdv5poaeRp6QVLRw9vKqzr9yl0plzQbkNO17dT9Os2DRNSU1E2Ni4okjjSE3+rRAGgnXOBVW8i0aYxPMdc24du5clKwQ=="
+    },
+    {
+      "id": "body-empty",
+      "kind": "note-body",
+      "recordId": "n-2",
+      "plaintext": "",
+      "context": "hushjot:note-body:n-2",
+      "envelopeBase64": "AgEXnofUNEvHw+u0AI5GygSLq5mbbCrv/5pbeTqH"
+    },
+    {
+      "id": "folder-nested",
+      "kind": "folder",
+      "recordId": "f-2",
+      "plaintext": "{\"name\":\"Rust\",\"parentId\":\"f-1\"}",
+      "context": "hushjot:folder:f-2",
+      "envelopeBase64": "AgHNTmG2T+djruuPQ24SHquP6F8cUpCP+R1CU3NQtXAUurXpKV5BE8lvQ6ssNOe7P6Q0q1udcgnInILUqpM="
+    },
+    {
+      "id": "share-key",
+      "kind": "share-key",
+      "recordId": "AAAAAAAAAAAAAAAAAAAAAA",
+      "plaintext": "Zm9yIHRlc3Rpbmcgb25seSwgb3BlbnMgbm90aGluZw",
+      "context": "hushjot:share-key:AAAAAAAAAAAAAAAAAAAAAA",
+      "envelopeBase64": "AgHmFEZ3+LWv5fxJPXtgEgHri/Dw2yQ0iYSSM8N4hN9fK2dtRbMKiAB+FRSBRQxU6bpSbL7MpareZHjq3AVP6gcvOrmIWvJt"
+    }
+  ]
+}
