@@ -23,4 +23,6 @@ assert_eq!(open_text(&key, &sealed, Some(&ctx)).unwrap(), "# Hello\nworld");
 assert_eq!(derive_title("# Hello\nworld"), "Hello");
 ```
 
+Copyright © 2026 Nebulosa d'Ideias Unipessoal Lda.
+
 Dual-licensed under [MIT](https://github.com/hushjot/hushjot-rs/blob/main/LICENSE-MIT) or [Apache-2.0](https://github.com/hushjot/hushjot-rs/blob/main/LICENSE-APACHE), at your option. Source, issues and security reporting: [github.com/hushjot/hushjot-rs](https://github.com/hushjot/hushjot-rs).

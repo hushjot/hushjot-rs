@@ -125,6 +125,8 @@ cargo test --all-features        # everything except the emulator journey
 
 ## Licence
 
+Copyright © 2026 Nebulosa d'Ideias Unipessoal Lda.
+
 Dual-licensed under [MIT](https://github.com/hushjot/hushjot-rs/blob/main/LICENSE-MIT) or [Apache-2.0](https://github.com/hushjot/hushjot-rs/blob/main/LICENSE-APACHE), at your option.
 
 The HushJot app and CLI are AGPL-3.0. This SDK is permissively licensed on purpose, so closed-source apps can offer HushJot Sync.

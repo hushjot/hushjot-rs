@@ -9,7 +9,7 @@ rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hushjot/hushjot-rs"
 homepage = "https://hushjot.com"
-authors = ["HushJot contributors"]
+authors = ["Nebulosa d'Ideias Unipessoal Lda."]
 
 [workspace.dependencies]
 hushjot-core = { path = "crates/hushjot-core", version = "0.1.0" }
