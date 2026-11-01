@@ -168,6 +168,47 @@ pub struct SearchResult {
     pub in_title: bool,
 }
 
+/// The vault's write guard, held ([`VaultInner::write_guard`]). Note rows read
+/// through it are [`Held`]: the only rows the vault's write helpers take
+/// ([`VaultInner::write_content`], `write_meta`, `tombstone`), so those never
+/// write from a row read before taking it. The engine's own note writes, and
+/// `create` and `undelete`, hold the guard and write the store directly.
+pub(crate) struct Writing<'a> {
+    _guard: std::sync::MutexGuard<'a, ()>,
+    inner: &'a VaultInner,
+}
+
+/// A note row read while the write guard is held, valid while that guard is.
+pub(crate) struct Held<'w> {
+    row: StoredNote,
+    _guard: std::marker::PhantomData<&'w ()>,
+}
+
+impl std::ops::Deref for Held<'_> {
+    type Target = StoredNote;
+
+    fn deref(&self) -> &StoredNote {
+        &self.row
+    }
+}
+
+impl Writing<'_> {
+    /// Note `id`'s row as it is, tombstone or not.
+    pub fn note(&self, id: &str) -> Result<Option<Held<'_>>> {
+        Ok(self.inner.store.note(id)?.map(|row| Held { row, _guard: std::marker::PhantomData }))
+    }
+
+    /// Every note row, tombstones included.
+    pub fn notes(&self) -> Result<Vec<Held<'_>>> {
+        Ok(self.inner.store.notes()?.into_iter().map(|row| Held { row, _guard: std::marker::PhantomData }).collect())
+    }
+
+    /// Note `id`'s row, unless it's gone or a tombstone.
+    pub fn live_note(&self, id: &str) -> Result<Held<'_>> {
+        self.note(id)?.filter(|n| !n.deleted).ok_or_else(|| Error::NotFound(format!("note {id}")))
+    }
+}
+
 pub(crate) struct VaultInner {
     pub uid: String,
     pub email: String,
@@ -176,6 +217,15 @@ pub(crate) struct VaultInner {
     pub backend: Arc<dyn Backend>,
     pub search: Mutex<SearchIndex>,
     pub capture: Mutex<CaptureTracker>,
+    /// Held across every read-then-write of a note row, local or remote: an
+    /// edit, pin, move, delete, restore or undelete here, a folder's delete of
+    /// its notes, and the engine applying a pulled note or settling a conflict.
+    /// Without it a pull landing between an edit's read and its write is
+    /// overwritten unseen, and `update_if_unchanged` could not promise
+    /// anything. Folder rows aren't covered: a folder's own changes, local or
+    /// pulled, are last-write-wins as before. Taken before any other lock of the
+    /// vault's, and never held across an await.
+    pub writes: Mutex<()>,
     pub events: broadcast::Sender<SyncEvent>,
     pub status: watch::Sender<SyncStatus>,
     pub pending: AtomicUsize,
@@ -186,6 +236,11 @@ pub(crate) struct VaultInner {
 impl VaultInner {
     fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// One note write at a time; see [`VaultInner::writes`].
+    pub fn write_guard(&self) -> Writing<'_> {
+        Writing { _guard: Self::lock(&self.writes), inner: self }
     }
 
     pub fn search_index(&self) -> std::sync::MutexGuard<'_, SearchIndex> {
@@ -310,7 +365,7 @@ impl VaultInner {
     }
 
     /// Write `content` as the note's text, keeping every other meta field.
-    fn write_content(&self, row: &StoredNote, content: &str, now: i64) -> Result<()> {
+    fn write_content(&self, row: &Held<'_>, content: &str, now: i64) -> Result<()> {
         let previous = codec::open_meta(&self.key, &row.id, &row.meta)?;
         let meta = codec::meta_for_content(content, &previous);
         self.store.put_note(&StoredNote {
@@ -327,27 +382,27 @@ impl VaultInner {
 
     /// A metadata-only write: the body bytes stay exactly as stored, which is
     /// what lets a pin or move that loses a race be rebased instead of forked.
-    fn write_meta(&self, row: &StoredNote, change: impl FnOnce(&mut NoteMetaPayload)) -> Result<()> {
+    fn write_meta(&self, row: &Held<'_>, change: impl FnOnce(&mut NoteMetaPayload)) -> Result<()> {
         let mut meta = codec::open_meta(&self.key, &row.id, &row.meta)?;
         change(&mut meta);
         self.store.put_note(&StoredNote {
             meta: codec::seal_meta(&self.key, &row.id, &meta),
             updated_at: now_ms(),
             revision: row.revision + 1,
-            ..row.clone()
+            ..StoredNote::clone(row)
         })?;
         self.search_index().set_folder(&row.id, meta.folder_id.clone());
         self.queue(&row.id, ChangeKind::Note, true)
     }
 
-    fn tombstone(&self, row: &StoredNote, at: i64) -> Result<()> {
+    fn tombstone(&self, row: &Held<'_>, at: i64) -> Result<()> {
         self.capture_version(row, VersionReason::Delete, at)?;
         self.store.put_note(&StoredNote {
             body: None,
             deleted: true,
             updated_at: at,
             revision: row.revision + 1,
-            ..row.clone()
+            ..StoredNote::clone(row)
         })?;
         self.search_index().remove(&row.id);
         self.queue(&row.id, ChangeKind::Note, true)
@@ -385,6 +440,7 @@ impl Vault {
             backend,
             search: Mutex::new(SearchIndex::new()),
             capture: Mutex::new(CaptureTracker::default()),
+            writes: Mutex::new(()),
             events,
             status,
             pending: AtomicUsize::new(0),
@@ -537,6 +593,24 @@ impl Vault {
     }
 }
 
+/// What [`Notes::update_if_unchanged`] (and, as a bool, [`Notes::update`]) did.
+/// On `Changed` and `Deleted` the caller still holds text that isn't in the
+/// note: dropping the result drops that text.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalUpdate {
+    /// The note held the expected text; it holds the new one now.
+    Written,
+    /// The note held the new text already: nothing written.
+    AlreadyCurrent,
+    /// The note no longer holds the expected text (an edit pulled from another
+    /// device, or a conflict's resolution): nothing written.
+    Changed,
+    /// The note was deleted (here, or on another device and pulled since):
+    /// nothing written.
+    Deleted,
+}
+
 /// Note operations. See [`Vault::notes`].
 pub struct Notes<'a> {
     vault: &'a Vault,
@@ -578,6 +652,9 @@ impl Notes<'_> {
     /// Create a note and return its id.
     pub fn create(&self, content: &str, folder_id: Option<&str>) -> Result<String> {
         let inner = self.inner();
+        // (its folder checked as one step with a folder's delete of its notes
+        // here; a pulled folder delete isn't covered, as folders aren't)
+        let _writing = inner.write_guard();
         if let Some(folder) = folder_id {
             if !inner.live_folder_exists(folder)? {
                 return Err(Error::NotFound(format!("folder {folder}")));
@@ -606,35 +683,78 @@ impl Notes<'_> {
     /// Call it as often as your editor likes — on a debounce is typical; the
     /// sync engine coalesces pushes, and history keeps one version per editing
     /// session rather than one per call.
+    ///
+    /// This writes over whatever the note holds now, another device's edit that
+    /// a pull brought in since your editor last read the note included. An
+    /// editor that can hold unsaved text while such an edit arrives should use
+    /// [`Notes::update_if_unchanged`].
     pub fn update(&self, id: &str, content: &str) -> Result<bool> {
+        Ok(self.write_text(id, None, content)? == ConditionalUpdate::Written)
+    }
+
+    /// Replace a note's text with `content` only while it still holds
+    /// `expected`, the text your editor last read or wrote: one step with the
+    /// sync, so a pulled edit is never written over unseen. On
+    /// [`ConditionalUpdate::Changed`] or [`ConditionalUpdate::Deleted`] nothing
+    /// is written; keep the user's text some other way (a new note, say) rather
+    /// than retrying blind. After [`crate::SyncEvent::ConflictCopy`], the
+    /// editor's text is in the copy already: follow it there (its id, and its
+    /// text as `expected`) before the next save.
+    ///
+    /// A note that never existed is [`Error::NotFound`].
+    pub fn update_if_unchanged(&self, id: &str, expected: &str, content: &str) -> Result<ConditionalUpdate> {
+        self.write_text(id, Some(expected), content)
+    }
+
+    /// [`Notes::update`] and [`Notes::update_if_unchanged`]: the read, the
+    /// check and the write under the vault's write guard.
+    fn write_text(&self, id: &str, expected: Option<&str>, content: &str) -> Result<ConditionalUpdate> {
         let inner = self.inner();
-        let row = inner.live_note(id)?;
+        let writing = inner.write_guard();
+        // (a conditional write says a deletion as its own result, the caller's
+        // text still to keep; a plain update says it as before)
+        let row = match writing.note(id)? {
+            Some(row) if row.deleted && expected.is_some() => return Ok(ConditionalUpdate::Deleted),
+            Some(row) if !row.deleted => row,
+            _ => return Err(Error::NotFound(format!("note {id}"))),
+        };
+
         let current = row.body.as_ref().map(|b| codec::open_body(&inner.key, id, b)).transpose()?.unwrap_or_default();
+        // (what the editor wants is there already, whoever wrote it: nothing to keep elsewhere)
         if current == content {
-            return Ok(false);
+            return Ok(ConditionalUpdate::AlreadyCurrent);
         }
+
+        if expected.is_some_and(|expected| expected != current) {
+            return Ok(ConditionalUpdate::Changed);
+        }
+
         let now = now_ms();
         if VaultInner::lock(&inner.capture).observe(id, now) {
             inner.capture_version(&row, VersionReason::Edit, now)?;
         }
         inner.write_content(&row, content, now)?;
-        Ok(true)
+
+        Ok(ConditionalUpdate::Written)
     }
 
     /// Pin or unpin. Pinned notes lead every list.
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
-        let row = self.inner().live_note(id)?;
+        let writing = self.inner().write_guard();
+        let row = writing.live_note(id)?;
         let meta = codec::open_meta(&self.inner().key, id, &row.meta)?;
         if meta.pinned_at.is_some() == pinned {
             return Ok(());
         }
+
         self.inner().write_meta(&row, |m| m.pinned_at = pinned.then(now_ms))
     }
 
     /// Move to a folder (`None` for the top level).
     pub fn move_to(&self, id: &str, folder_id: Option<&str>) -> Result<()> {
         let inner = self.inner();
-        let row = inner.live_note(id)?;
+        let writing = inner.write_guard();
+        let row = writing.live_note(id)?;
         if let Some(folder) = folder_id {
             if !inner.live_folder_exists(folder)? {
                 return Err(Error::NotFound(format!("folder {folder}")));
@@ -650,7 +770,8 @@ impl Notes<'_> {
     /// Delete: a tombstone that syncs, with the final text kept in history for
     /// 30 days so [`Notes::undelete`] can bring it back.
     pub fn delete(&self, id: &str) -> Result<()> {
-        let row = self.inner().live_note(id)?;
+        let writing = self.inner().write_guard();
+        let row = writing.live_note(id)?;
         self.inner().tombstone(&row, now_ms())
     }
 
@@ -689,6 +810,16 @@ impl Notes<'_> {
         };
         let content = codec::open_body(&inner.key, id, &body)?;
         let old = codec::open_meta(&inner.key, id, &meta).unwrap_or_default();
+
+        // (read again under the guard, after the network: a pull may have
+        // brought the note back meanwhile, which is then left as it is, and its
+        // folder may have gone)
+        let writing = inner.write_guard();
+        let Some(row) = writing.note(id)? else { return Err(Error::NotFound(format!("note {id}"))) };
+        if !row.deleted {
+            return Ok(());
+        }
+
         let folder_id = match old.folder_id {
             Some(f) if inner.live_folder_exists(&f)? => Some(f),
             _ => None,
@@ -852,16 +983,22 @@ impl Folders<'_> {
         if doomed.is_empty() {
             return Err(Error::NotFound(format!("folder {id}")));
         }
-        let at = now_ms();
-        for row in inner.store.notes()?.into_iter().filter(|r| !r.deleted) {
-            let in_doomed = codec::open_meta(&inner.key, &row.id, &row.meta)
+
+        let in_doomed = |row: &StoredNote| {
+            codec::open_meta(&inner.key, &row.id, &row.meta)
                 .ok()
                 .and_then(|m| m.folder_id)
-                .is_some_and(|f| doomed.contains(&f));
-            if in_doomed {
-                inner.tombstone(&row, at)?;
-            }
+                .is_some_and(|f| doomed.contains(&f))
+        };
+        let at = now_ms();
+        // (the notes read, tombstoned and the folders deleted as one step: no
+        // note is filed into one of them meanwhile)
+        let writing = inner.write_guard();
+
+        for row in writing.notes()?.into_iter().filter(|r| !r.deleted && in_doomed(r)) {
+            inner.tombstone(&row, at)?;
         }
+
         // One clock for the whole subtree: one user action.
         for folder_id in &doomed {
             if let Some(row) = inner.store.folder(folder_id)? {
@@ -873,6 +1010,7 @@ impl Folders<'_> {
                 inner.queue(folder_id, ChangeKind::Folder, true)?;
             }
         }
+
         Ok(())
     }
 }
@@ -947,7 +1085,8 @@ impl History<'_> {
     pub async fn restore(&self, version_id: &str) -> Result<()> {
         let version = self.open(version_id).await?;
         let inner = self.inner();
-        let row = inner.live_note(&self.note_id)?;
+        let writing = inner.write_guard();
+        let row = writing.live_note(&self.note_id)?;
         let now = now_ms();
         inner.capture_version(&row, VersionReason::Restore, now)?;
         inner.write_content(&row, &version.content, now)

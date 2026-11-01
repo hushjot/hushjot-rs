@@ -7,8 +7,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use hushjot::core::usage::DAILY_PUSH_LIMIT;
+use hushjot::ConditionalUpdate;
 use hushjot::{SyncEvent, SyncStatus};
-use support::{device, server_saw, FakeServer};
+use support::{device, device_with_store, server_saw, FakeServer};
 
 #[tokio::test]
 async fn a_note_written_on_one_device_arrives_on_another() {
@@ -445,4 +446,178 @@ async fn futures_join_all(server: &Arc<FakeServer>, n: usize) -> Vec<support::De
         out.push(device(server).await);
     }
     out
+}
+
+/// A store that, once armed with a note's id, stops the next read of that note
+/// right after it's made, until it's let go: an edit caught between its read
+/// and its write.
+struct PausingStore {
+    inner: hushjot::MemoryStore,
+    armed: std::sync::Mutex<Option<String>>,
+    reached: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl PausingStore {
+    fn new() -> (Arc<Self>, std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let store = PausingStore {
+            inner: hushjot::MemoryStore::new(),
+            armed: std::sync::Mutex::new(None),
+            reached: std::sync::Mutex::new(reached_tx),
+            go: std::sync::Mutex::new(go_rx),
+        };
+        (Arc::new(store), reached_rx, go_tx)
+    }
+}
+
+impl hushjot::Store for PausingStore {
+    fn note(&self, id: &str) -> hushjot::Result<Option<hushjot::store::StoredNote>> {
+        let row = self.inner.note(id);
+        let armed = {
+            let mut armed = self.armed.lock().unwrap();
+            if armed.as_deref() == Some(id) {
+                armed.take()
+            } else {
+                None
+            }
+        };
+        if armed.is_some() {
+            self.reached.lock().unwrap().send(()).unwrap();
+            self.go.lock().unwrap().recv_timeout(support::PAUSE_LIMIT).expect("the paused read was never let go");
+        }
+        row
+    }
+    fn put_note(&self, note: &hushjot::store::StoredNote) -> hushjot::Result<()> {
+        self.inner.put_note(note)
+    }
+    fn notes(&self) -> hushjot::Result<Vec<hushjot::store::StoredNote>> {
+        self.inner.notes()
+    }
+    fn folder(&self, id: &str) -> hushjot::Result<Option<hushjot::store::StoredFolder>> {
+        self.inner.folder(id)
+    }
+    fn put_folder(&self, folder: &hushjot::store::StoredFolder) -> hushjot::Result<()> {
+        self.inner.put_folder(folder)
+    }
+    fn folders(&self) -> hushjot::Result<Vec<hushjot::store::StoredFolder>> {
+        self.inner.folders()
+    }
+    fn enqueue(&self, id: &str, kind: hushjot::store::ChangeKind) -> hushjot::Result<()> {
+        self.inner.enqueue(id, kind)
+    }
+    fn dequeue(&self, id: &str, token: Option<i64>) -> hushjot::Result<()> {
+        self.inner.dequeue(id, token)
+    }
+    fn queued(&self) -> hushjot::Result<Vec<hushjot::store::QueuedChange>> {
+        self.inner.queued()
+    }
+    fn is_queued(&self, id: &str) -> hushjot::Result<bool> {
+        self.inner.is_queued(id)
+    }
+    fn get(&self, key: &str) -> hushjot::Result<Option<String>> {
+        self.inner.get(key)
+    }
+    fn set(&self, key: &str, value: Option<&str>) -> hushjot::Result<()> {
+        self.inner.set(key, value)
+    }
+    fn clear_prefix(&self, prefix: &str) -> hushjot::Result<()> {
+        self.inner.clear_prefix(prefix)
+    }
+    fn put_version(&self, version: &hushjot::store::StoredVersion) -> hushjot::Result<()> {
+        self.inner.put_version(version)
+    }
+    fn versions_for(&self, note_id: &str) -> hushjot::Result<Vec<hushjot::store::StoredVersion>> {
+        self.inner.versions_for(note_id)
+    }
+    fn pending_versions(&self, limit: usize) -> hushjot::Result<Vec<hushjot::store::StoredVersion>> {
+        self.inner.pending_versions(limit)
+    }
+    fn set_version_state(
+        &self,
+        note_id: &str,
+        seal_id: &str,
+        state: hushjot::store::VersionState,
+    ) -> hushjot::Result<()> {
+        self.inner.set_version_state(note_id, seal_id, state)
+    }
+    fn prune_versions(&self, now: i64) -> hushjot::Result<()> {
+        self.inner.prune_versions(now)
+    }
+    fn wipe(&self) -> hushjot::Result<()> {
+        self.inner.wipe()
+    }
+}
+
+#[tokio::test]
+async fn a_conditional_update_never_writes_over_a_pulled_edit() {
+    let server = FakeServer::new();
+    let a = device(&server).await;
+    let b = device(&server).await;
+    let id = a.vault.notes().create("draft", None).unwrap();
+    a.vault.sync_now().await;
+    b.vault.sync_now().await;
+
+    b.vault.notes().update(&id, "theirs").unwrap();
+    b.vault.sync_now().await;
+    a.vault.sync_now().await;
+
+    // A's editor last read "draft": the pulled edit isn't written over.
+    let notes = a.vault.notes();
+    assert_eq!(notes.update_if_unchanged(&id, "draft", "mine").unwrap(), ConditionalUpdate::Changed);
+    assert_eq!(notes.get(&id).unwrap().content, "theirs");
+    assert_eq!(a.vault.pending_count(), 0, "nothing queued");
+
+    assert_eq!(notes.update_if_unchanged(&id, "theirs", "theirs").unwrap(), ConditionalUpdate::AlreadyCurrent);
+    assert_eq!(notes.update_if_unchanged(&id, "theirs", "mine").unwrap(), ConditionalUpdate::Written);
+    assert_eq!(notes.get(&id).unwrap().content, "mine");
+
+    // Deleted on the other device and pulled: its own result, the text still to keep.
+    b.vault.sync_now().await;
+    b.vault.notes().delete(&id).unwrap();
+    b.vault.sync_now().await;
+    a.vault.sync_now().await;
+    assert_eq!(notes.update_if_unchanged(&id, "mine", "again").unwrap(), ConditionalUpdate::Deleted);
+    assert!(matches!(notes.update_if_unchanged("never-was", "", "x"), Err(hushjot::Error::NotFound(_))));
+}
+
+/// A pull that arrives while an edit is between its read and its write waits
+/// for the write: the pulled text is never overwritten unseen, and once both
+/// devices sync each text is in a note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pull_never_lands_between_an_edits_read_and_write() {
+    let server = FakeServer::new();
+    let (store, reached, go) = PausingStore::new();
+    let a = device_with_store(&server, store.clone()).await;
+    let b = device(&server).await;
+    let id = a.vault.notes().create("draft", None).unwrap();
+    a.vault.sync_now().await;
+    b.vault.sync_now().await;
+    b.vault.notes().update(&id, "theirs").unwrap();
+    b.vault.sync_now().await;
+
+    // A's edit reads "draft", then stops before writing.
+    *store.armed.lock().unwrap() = Some(id.clone());
+    let (vault, note) = (a.vault.clone(), id.clone());
+    let writer = std::thread::spawn(move || vault.notes().update_if_unchanged(&note, "draft", "mine"));
+    let reached = tokio::task::spawn_blocking(move || reached.recv_timeout(support::PAUSE_LIMIT)).await.unwrap();
+    assert!(reached.is_ok(), "the edit never read the note");
+
+    // A pull now waits for the edit, rather than landing under it.
+    let puller = a.vault.clone();
+    let mut pull = tokio::spawn(async move { puller.sync_now().await });
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(300), &mut pull).await.is_err();
+    go.send(()).unwrap();
+    assert_eq!(writer.join().unwrap().unwrap(), ConditionalUpdate::Written);
+    assert!(waited, "the pull went on while the edit was between its read and its write");
+    pull.await.unwrap();
+
+    for _ in 0..3 {
+        a.vault.sync_now().await;
+        b.vault.sync_now().await;
+    }
+    let texts: Vec<String> =
+        a.vault.notes().list().unwrap().iter().map(|n| a.vault.notes().get(&n.id).unwrap().content).collect();
+    assert!(texts.contains(&"theirs".to_string()) && texts.contains(&"mine".to_string()), "{texts:?}");
 }

@@ -833,6 +833,10 @@ impl Engine {
     async fn resolve_conflict(&mut self, entry: &QueuedChange, raw: &StoredNote, state: NoteSyncState) -> Result<()> {
         let id = &entry.id;
         let remote = self.vault.backend.fetch_note(id).await?;
+        // (from here on one step with any local write of the note; no await
+        // follows, so the guard never crosses one)
+        let vault = Arc::clone(&self.vault);
+        let _writing = vault.write_guard();
 
         // Refused but not moved: not a conflict. Park rather than copy forever.
         let Some(remote) = remote.filter(|r| r.revision != state.base) else {
@@ -1080,6 +1084,11 @@ impl Engine {
     }
 
     fn apply_remote_note(&mut self, remote: &RemoteNote) -> Result<()> {
+        // (one step with any local write of the note: an edit's read and write
+        // never straddle this)
+        let vault = Arc::clone(&self.vault);
+        let _writing = vault.write_guard();
+
         let state = self.load_state(&remote.id)?;
         // At or below what we recorded: our own write echoing back.
         if state.as_ref().is_some_and(|s| remote.revision <= s.base) {

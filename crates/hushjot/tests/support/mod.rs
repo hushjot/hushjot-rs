@@ -48,6 +48,9 @@ pub struct State {
     pub received: Vec<Vec<u8>>,
 }
 
+/// How long a test's pause waits to be let go before it fails the test.
+pub const PAUSE_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The fake server, shared by every device in a test.
 pub struct FakeServer {
     pub state: Mutex<State>,
