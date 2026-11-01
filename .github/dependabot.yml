@@ -3,6 +3,21 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly }
+    groups:
+      cargo:
+        patterns: ["*"]
+    ignore:
+      # Breaking API changes (digest 0.11, getrandom::fill); upgrade by hand.
+      - dependency-name: sha2
+        update-types: ["version-update:semver-major"]
+      - dependency-name: getrandom
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    groups:
+      actions:
+        patterns: ["*"]
+    ignore:
+      # The msrv job pins the toolchain to rust-version in Cargo.toml.
+      - dependency-name: dtolnay/rust-toolchain
