@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **`hushjot`:**
+  - `Notes::update_if_unchanged` writes a note's text only while it still holds the text the editor last read, as one step with the sync, and returns `ConditionalUpdate::Changed` (or `Deleted`) otherwise. An editor holding unsaved text while another device's edit arrives no longer has to choose between writing over it and losing its own.
+  - Fixed: a pull that landed between a local write's read and its write (an edit, pin, move, delete, restore, undelete or a folder's delete) was overwritten unseen. Those writes, and the sync's application of a pulled note and settling of a conflict, now hold one write guard; the vault's write helpers take only rows read under it.
+
 ## 0.1.0 (unreleased)
 
 First release. The emulator journey runs against the app's live rules.

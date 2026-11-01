@@ -66,8 +66,8 @@ pub use error::{Error, Result, PLANS_URL};
 pub use secrets::{MemorySecrets, SecretStore};
 pub use store::{MemoryStore, Store};
 pub use vault::{
-    DeletedNote, Folders, History, Note, NoteSummary, NoteVersion, Notes, PublishedShare, SearchResult, Shares, Vault,
-    VersionInfo,
+    ConditionalUpdate, DeletedNote, Folders, History, Note, NoteSummary, NoteVersion, Notes, PublishedShare,
+    SearchResult, Shares, Vault, VersionInfo,
 };
 
 #[cfg(feature = "keyring")]

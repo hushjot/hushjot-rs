@@ -71,6 +71,7 @@ vault.notes().update(&id, &text)?;                 // call on your editor's save
 
 - **Writes are local-first.** They seal, store, queue and return without waiting for the network, so call them from your save path freely.
 - **Debounce your saves.** A few hundred milliseconds of idle is plenty. History keeps one version per editing session, not one per save, so frequent saves cost nothing there.
+- **Save with `update_if_unchanged` when unsaved text can meet a pull.** Pass the text your editor last read or saved as `expected`. If another device's edit (or delete) arrived meanwhile you get `ConditionalUpdate::Changed` (or `Deleted`) and nothing is written: keep the user's text some other way (a new note is simplest) rather than calling `update`, which writes over whatever the note holds. On `SyncEvent::ConflictCopy`, your text is in the copy already: move the open editor to `copy_id`, with the copy's text as `expected`, so the next save doesn't make a second copy.
 - **The title is the first line.** Notes have no separate title field. Show `summary.title` and do not offer a title box.
 - **Pinning and moving** are separate calls (`set_pinned`, `move_to`), never a re-save of the text.
 - **Deleting is recoverable.** `notes().recently_deleted()` and `notes().undelete(id)` give you a Trash view.
